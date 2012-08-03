@@ -65,7 +65,8 @@ class Engine(object):
 		self._io_tasks[fd] = self.task(func)
 		self._impl.register(fd, events | ERROR)
 
-	def add_io_task(self, fd, task, events):
+	def become_io_task(self, fd, events, task=None):
+		task = task or Task.getcurrent()
 		self._io_tasks[fd] = task
 		self._impl.register(fd, events | ERROR)
 
