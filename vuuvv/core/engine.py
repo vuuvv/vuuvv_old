@@ -30,6 +30,16 @@ RUNNING = 0
 CLOSING = 1
 STOPPED = 2
 
+def wait_read(fd, engine=None):
+	engine = engine or Engine.instance()
+	engine.io(fd, READ | ERROR)
+	engine._task.switch()
+
+def wait_write(fd, engine=None):
+	engine = engine or Engine.instance()
+	engine.io(fd, WRITE | ERROR)
+	engine._task.switch()
+
 class Engine(object):
 	def __init__(self, impl=None):
 		self._impl = impl or _poll()
@@ -53,34 +63,29 @@ class Engine(object):
 	def initialized(cls):
 		return getattr(cls, "_instance", None) is not None
 
-	@classmethod
-	def wait(cls):
-		engine = cls.instance()
-		engine._task.switch()
-
 	def task(self, func):
+		if isinstance(func, Task):
+			return func
 		return Task(func, self._task)
 
-	def add_io(self, fd, func, events):
-		self._io_tasks[fd] = self.task(func)
-		self._impl.register(fd, events | ERROR)
+	def io(self, fd, events, func=None):
+		_tasks = self._io_tasks
+		if fd in _tasks:
+			self._impl.modify(fd, events | ERROR)
+		else:
+			task = self.task(func) if func is not None else Task.getcurrent()
+			_tasks[fd] = task
+			self._impl.register(fd, events | ERROR)
 
-	def become_io_task(self, fd, events, task=None):
-		task = task or Task.getcurrent()
-		self._io_tasks[fd] = task
-		self._impl.register(fd, events | ERROR)
-
-	# eg. use when a sock recved a data and now want to send a response
-	def update_io_status(self, fd, events):
-		self._impl.modify(fd, events | ERROR)
-
-	def remove_io(self, fd):
-		self._io_tasks.pop(fd, None)
+	def kill(self, fd):
+		task = self._io_tasks.pop(fd, None)
 		self._events.pop(fd, None)
 		try:
 			self._impl.unregister(fd)
 		except (OSError, IOError):
 			logging.debug("Error deleting fd from Engine", exec_info=True)
+		if task:
+			task.kill()
 
 	def add_timeout(self, deadline, callback):
 		timeout = _Timeout(deadline, callback, self)
@@ -93,12 +98,23 @@ class Engine(object):
 	def add_task(self, func):
 		self._tasks.append(self.task(func))
 
+	def _add_fake_io(self):
+		import _socket
+		sock = _socket.socket()
+		# should keep the socket reference, or the sock may be closed out of 
+		# this function
+		self._fake_sock = sock
+		self.io(sock.fileno(), ERROR, lambda x: x)
+
 	def _start(self):
 		if self._status != STOPPED:
 			logging.warning("The engine must have only one instance, status: %d" % self._status)
 			return
 
 		self._status = RUNNING
+
+		# make sure if no fd in wait queue, poll function run correct
+		self._add_fake_io()
 		while True:
 			poll_timeout = 3600.0
 

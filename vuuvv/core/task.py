@@ -19,9 +19,14 @@ class Task(greenlet):
 	def timeout(self):
 		self.throw(TimeoutException)
 
+	def kill(self, exception=greenlet.GreenletExit):
+		self.throw(exception)
+
 	def _run(self, *args, **kwargs):
 		try:
 			self.func(*args, **kwargs)
+		except greenlet.GreenletExit:
+			return
 		except TimeoutException:
 			logging.warning('This task is time out')
 		except Exception:

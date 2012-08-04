@@ -10,7 +10,7 @@ if __name__ == '__main__':
 
 	sys.path.insert(0, "..")
 
-	from vuuvv.core.engine import Engine, READ, WRITE, Timer
+	from vuuvv.core.engine import Engine, READ, WRITE, Timer, wait_write
 	from vuuvv.core.task import Task
 
 	#def cb(sock, fd, events):
@@ -31,8 +31,8 @@ if __name__ == '__main__':
 	def cb(fd, event):
 		print("hello", time.time())
 
-	def cb1(fd, events):
-		pass
+	def cb1():
+		print("hello")
 
 	def connect():
 		sock.setblocking(False)
@@ -40,12 +40,16 @@ if __name__ == '__main__':
 			sock.connect(("www.163.com", 80))
 		except socket.error as e:
 			if e.args[0] not in (errno.EINPROGRESS, errno.EWOULDBLOCK):
-				self.close()
+				sock.close()
 				return
-		engine.add_io(sock.fileno(), cb, WRITE)
+		wait_write(sock.fileno())
+		print("connected")
+		engine.kill(sock.fileno())
+		print("killed")
 
-	#engine.add_timeout(timedelta(seconds=1), cb)
+	#engine.add_timeout(timedelta(seconds=1), cb1)
 	#callback = functools.partial(cb, sock)
 	#engine.add_io(sock.fileno(), cb1, READ)
 	engine.add_task(connect)
+	#Timer(cb1, 1000.0).start()
 	engine.start()
