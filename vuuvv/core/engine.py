@@ -33,12 +33,12 @@ STOPPED = 2
 def wait_read(fd, engine=None):
 	engine = engine or Engine.instance()
 	engine.io(fd, READ | ERROR)
-	engine._task.switch()
+	engine.task.switch()
 
 def wait_write(fd, engine=None):
 	engine = engine or Engine.instance()
 	engine.io(fd, WRITE | ERROR)
-	engine._task.switch()
+	engine.task.switch()
 
 class Engine(object):
 	def __init__(self, impl=None):
@@ -49,7 +49,7 @@ class Engine(object):
 		self._timeouts = []
 		self._status = STOPPED
 
-		self._task = Task(self._start)
+		self.task = TaskBase(self._start)
 
 	@classmethod
 	def instance(cls):
@@ -63,17 +63,12 @@ class Engine(object):
 	def initialized(cls):
 		return getattr(cls, "_instance", None) is not None
 
-	def task(self, func):
-		if isinstance(func, Task):
-			return func
-		return Task(func, self._task)
-
-	def io(self, fd, events, func=None):
+	def io(self, fd, events, task=None):
 		_tasks = self._io_tasks
 		if fd in _tasks:
 			self._impl.modify(fd, events | ERROR)
 		else:
-			task = self.task(func) if func is not None else Task.getcurrent()
+			task = task or Task.getcurrent()
 			_tasks[fd] = task
 			self._impl.register(fd, events | ERROR)
 
@@ -95,8 +90,8 @@ class Engine(object):
 	def remove_timeout(self, timeout):
 		timeout.task = None
 
-	def add_task(self, func):
-		self._tasks.append(self.task(func))
+	def add_task(self, task):
+		self._tasks.append(task)
 
 	def _add_fake_io(self):
 		import _socket
@@ -177,7 +172,7 @@ class Engine(object):
 	def start(self):
 		# enter main loop
 		try:
-			self._task.process()
+			self.task.process()
 		except:
 			logging.error("Fatal Error", exc_info=True)
 
@@ -239,6 +234,46 @@ class Timer(object):
 			self._last_trigger_time = next_deadline
 
 			self._timeout = self.engine.add_timeout(next_deadline, self._run)
+
+class TimeoutException(Exception):
+	pass
+
+class TaskBase(greenlet):
+	__slots__ = "func", "last_yield"
+
+	def __init__(self, func, parent=None):
+		self.func = func
+		super(TaskBase, self).__init__(self._run, parent)
+
+	def process(self, *args, **kwargs):
+		self.switch(*args, **kwargs)
+
+	def timeout(self):
+		self.throw(TimeoutException)
+
+	def kill(self, exception=greenlet.GreenletExit):
+		self.throw(exception)
+
+	def _run(self, *args, **kwargs):
+		try:
+			self.func(*args, **kwargs)
+		except greenlet.GreenletExit:
+			return
+		except TimeoutException:
+			logging.warning('This task is time out')
+		except Exception:
+			exc = sys.exc_info()
+			self.parent.throw(*exc)
+
+class Task(TaskBase):
+	def __init__(self, func):
+		self.fd = None
+		super(Task, self).__init__(func, Engine.instance().task)
+
+	def start(self, engine=None):
+		engine = engine or Engine.instance()
+		engine.add_task(self)
+
 
 class _Select(object):
 	def __init__(self):
