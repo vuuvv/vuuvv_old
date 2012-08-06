@@ -1,3 +1,4 @@
+import sys
 import select
 import errno
 import heapq
@@ -7,7 +8,7 @@ from time import time
 from datetime import timedelta
 from functools import wraps
 
-from .task import Task
+from greenlet import greenlet
 
 #TODO: 对超时的IO进行定期处理
 
@@ -30,15 +31,14 @@ RUNNING = 0
 CLOSING = 1
 STOPPED = 2
 
-def wait_read(fd, engine=None):
-	engine = engine or Engine.instance()
-	engine.io(fd, READ | ERROR)
-	engine.task.switch()
+class TimeoutException(Exception):
+	pass
 
-def wait_write(fd, engine=None):
-	engine = engine or Engine.instance()
-	engine.io(fd, WRITE | ERROR)
-	engine.task.switch()
+class SyncException(Exception):
+	pass
+
+class PollException(Exception):
+	pass
 
 class Engine(object):
 	def __init__(self, impl=None):
@@ -63,13 +63,16 @@ class Engine(object):
 	def initialized(cls):
 		return getattr(cls, "_instance", None) is not None
 
-	def io(self, fd, events, task=None):
+	def io(self, fd, events, task):
+		# a fd only appear in a task, a task can use many fds
 		_tasks = self._io_tasks
 		if fd in _tasks:
+			assert task == getcurrent()
+			_tasks[fd].fd = fd
 			self._impl.modify(fd, events | ERROR)
 		else:
-			task = task or Task.getcurrent()
 			_tasks[fd] = task
+			task.fd = fd
 			self._impl.register(fd, events | ERROR)
 
 	def kill(self, fd):
@@ -79,8 +82,6 @@ class Engine(object):
 			self._impl.unregister(fd)
 		except (OSError, IOError):
 			logging.debug("Error deleting fd from Engine", exec_info=True)
-		if task:
-			task.kill()
 
 	def add_timeout(self, deadline, callback):
 		timeout = _Timeout(deadline, callback, self)
@@ -99,7 +100,7 @@ class Engine(object):
 		# should keep the socket reference, or the sock may be closed out of 
 		# this function
 		self._fake_sock = sock
-		self.io(sock.fileno(), ERROR, lambda x: x)
+		self.io(sock.fileno(), ERROR, Task(lambda x: x))
 
 	def _start(self):
 		if self._status != STOPPED:
@@ -155,7 +156,13 @@ class Engine(object):
 			while self._events:
 				fd, events = self._events.popitem()
 				task = self._io_tasks[fd]
+				if fd != task.fd:
+					task.throw(SyncException)
 				try:
+					if events & ERROR:
+						logging.error("error on fd: %d", fd)
+						task.throw(PollException)
+						continue
 					task.process(fd, events)
 				except (OSError, IOError) as e:
 					if e.args[0] == errno.EPIPE:
@@ -235,9 +242,6 @@ class Timer(object):
 
 			self._timeout = self.engine.add_timeout(next_deadline, self._run)
 
-class TimeoutException(Exception):
-	pass
-
 class TaskBase(greenlet):
 	__slots__ = "func", "last_yield"
 
@@ -257,15 +261,12 @@ class TaskBase(greenlet):
 	def _run(self, *args, **kwargs):
 		try:
 			self.func(*args, **kwargs)
-		except greenlet.GreenletExit:
-			return
-		except TimeoutException:
-			logging.warning('This task is time out')
 		except Exception:
 			exc = sys.exc_info()
 			self.parent.throw(*exc)
 
 class Task(TaskBase):
+	__slots__ = ("fd",)
 	def __init__(self, func):
 		self.fd = None
 		super(Task, self).__init__(func, Engine.instance().task)
@@ -274,6 +275,18 @@ class Task(TaskBase):
 		engine = engine or Engine.instance()
 		engine.add_task(self)
 
+	def _run(self, *args, **kwargs):
+		try:
+			self.func(*args, **kwargs)
+		except TimeoutException:
+			logging.warning('This task is time out')
+		except Exception:
+			exc = sys.exc_info()
+			self.parent.throw(*exc)
+		finally:
+			fd = self.fd
+			if fd is not None:
+				Engine.instance().kill(fd)
 
 class _Select(object):
 	def __init__(self):
@@ -316,3 +329,15 @@ class _Select(object):
 		return events.items()
 
 _poll = _Select
+getcurrent = Task.getcurrent
+
+def wait_read(fd, engine=None):
+	engine = engine or Engine.instance()
+	engine.io(fd, READ | ERROR, getcurrent())
+	engine.task.switch()
+
+def wait_write(fd, engine=None):
+	engine = engine or Engine.instance()
+	engine.io(fd, WRITE | ERROR, getcurrent())
+	engine.task.switch()
+
