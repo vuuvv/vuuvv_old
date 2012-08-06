@@ -160,7 +160,6 @@ class Engine(object):
 					task.throw(SyncException)
 				try:
 					if events & ERROR:
-						logging.error("error on fd: %d", fd)
 						task.throw(PollException)
 						continue
 					task.process(fd, events)

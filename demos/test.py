@@ -36,9 +36,11 @@ if __name__ == '__main__':
 
 	def connect():
 		conn = Connection()
-		conn.connect(("smtp.163.com", 25))
+		conn.connect(("www.163.com", 80))
 		print("connected")
-		print(conn.read(1000))
+		conn.write(b"GET / HTTP/1.1\r\nHost: www.163.com \r\n\r\n")
+		data = conn.read_until(b"\r\n\r\n")
+		print(data)
 		#try:
 		#	sock.connect(("smtp.163.com", 25))
 		#except socket.error as e:

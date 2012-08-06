@@ -1,3 +1,10 @@
+import os
+import sys
+import logging
+from ssl import (SSLSocket, SSL_ERROR_WANT_READ, SSL_ERROR_WANT_WRITE,
+				 SSL_ERROR_EOF, SSL_ERROR_ZERO_RETURN, SSL_ERROR_SSL)
+
+
 from _socket import socket, error as socket_error, SOL_SOCKET, SO_ERROR
 from errno import EINPROGRESS, EWOULDBLOCK
 from collections import deque
@@ -21,18 +28,21 @@ class Connection(object):
 		try:
 			wait_read(self.fileno)
 		except PollException:
-			errno = self.socket.getsocketopt(SOL_SOCKET, SO_ERROR)
+			errno = self.socket.getsockopt(SOL_SOCKET, SO_ERROR)
 			self.error = socket.error(errno, os.strerror(errno))
+			# TODO: strerror 需要优化，现在显示的信息不完整
+			logging.error(self.error)
 			self.close()
 		except Exception:
 			raise
 
 	def _wait_write(self):
 		try:
-			wait_read(self.fileno)
+			wait_write(self.fileno)
 		except PollException:
-			errno = self.socket.getsocketopt(SOL_SOCKET, SO_ERROR)
-			self.error = socket.error(errno, os.strerror(errno))
+			errno = self.socket.getsockopt(SOL_SOCKET, SO_ERROR)
+			self.error = socket_error(errno, os.strerror(errno))
+			logging.error(self.error)
 			self.close()
 		except Exception:
 			raise
@@ -55,7 +65,9 @@ class Connection(object):
 					self.fileno, e)
 				self.close()
 				return
+		print(self.socket)
 		self._wait_write()
+		print(self.socket)
 		err = self.socket.getsockopt(SOL_SOCKET, SO_ERROR)
 		if err != 0:
 			self.error = socket_error(err, os.strerror(err))
@@ -68,7 +80,6 @@ class Connection(object):
 		# read the data from socket to _read_buffer
 		try:
 			chunk = self.socket.recv(self.read_chunk_size)
-			print("chunk: %s" % chunk)
 		except socket_error as e:
 			if e.args[0] in (EWOULDBLOCK, EAGAIN):
 				# no data in socket buffer
@@ -101,7 +112,6 @@ class Connection(object):
 			while True:
 				self._wait_read()
 				size = self._read()
-				print("read from socket %s, %d" % (size, n))
 				if size < 0:
 					# socket closed
 					self._read_buffer_size = 0
@@ -114,6 +124,9 @@ class Connection(object):
 
 	def read_until(self, delimiter):
 		deque = self._read_buffer
+		if not deque:
+			self._wait_read()
+			self._read()
 		# end bytes of last chunk
 		delimiter_len = len(delimiter)
 		start = 0
@@ -126,15 +139,57 @@ class Connection(object):
 			if loc != -1:
 				# hit it
 				data_len = start + delimiter_len
-				data = chunk[:data_len]
+				data = chunk[:loc]
 				return data
-			if length == 1:
+			# not found the delimiter
+			if len(deque) == 1:
 				# read buffer is exhausted
 				self._wait_read()
+				self._read()
 			else:
 				# merge more deque entry
 				_merge(deque, merge_size)
 				start = min(length - delimiter_len, 0)
+
+	def _write(self, data):
+		try:
+			n = self.socket.send(data)
+			if n == 0:
+				raise socket_error("Write error on %d: %s", self.fileno, e)
+		except socket_error as e:
+			if e.args[0] in (EWOULDBLOCK, EAGAIN):
+				return
+			else:
+				logging.warning("Write error on %d: %s", self.fileno, e)
+				self.close()
+				return
+
+	def write(self, data, callback=None):
+		self._check_closed()
+		if not data:
+			return
+		self._wait_write()
+		WRITE_BUFFER_CHUNK_SIZE = 128 * 1024
+		if len(data) > WRITE_BUFFER_CHUNK_SIZE:
+			for i in range(0, len(data), WRITE_BUFFER_CHUNK_SIZE):
+				self._write(data[i:i+WRITE_BUFFER_CHUNK_SIZE])
+				self._wait_write()
+		else:
+			self._write(data)
+			self._wait_write()
+
+	def _check_closed(self):
+		if not self.socket:
+			raise IOError("Connection is closed")
+
+class SSLConnection(Connection):
+	def __init__(self, sock, *args, **kwargs):
+		self._ssl_options = kwargs.pop('ssl_options', {})
+		sock = sock or SSLSocket()
+		super(SSLConnection, self).__init__(sock, *args, **kwargs)
+		self._ssl_accepting = True
+		self._handshake_reading = False
+		self._handshake_writing = False
 
 def _merge(deque, min_size):
 	"""
