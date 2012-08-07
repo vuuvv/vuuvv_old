@@ -11,3 +11,8 @@ class TestCase(unittest.TestCase):
 	def __call__(self, result=None):
 		Task(functools.partial(self._wrap_run, result)).start()
 
+	def assertSocketErrno(self, error, excepted):
+		if not isinstance(error, socket_error):
+			raise RuntimeError("Exception should be a socket.error")
+
+

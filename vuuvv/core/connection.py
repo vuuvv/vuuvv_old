@@ -27,13 +27,12 @@ class Connection(object):
 	def _wait(self, status, deadline, timeout_callback):
 		try:
 			wait(self.fileno, status, deadline)
-		except socket_error:
+		except socket_error as e:
 			errno = self.socket.getsockopt(SOL_SOCKET, SO_ERROR)
-			self.error = socket_error(errno, strerror(errno))
-			# TODO: strerror 需要优化，现在显示的信息不完整
-			logging.error(self.error)
+			err = socket_error(errno, strerror(errno))
+			logging.error(err)
 			self.close()
-			raise
+			raise err
 		except TimeoutException:
 			timeout_callback()
 		except Exception:
@@ -89,7 +88,7 @@ class Connection(object):
 				logging.warning("Connect error on fd %d: %s",
 					self.fileno, e)
 				self.close()
-				return
+				raise e
 		self._wait_connect(deadline, None)
 		err = sock.getsockopt(SOL_SOCKET, SO_ERROR)
 		if err != 0:

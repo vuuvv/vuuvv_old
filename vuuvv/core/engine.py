@@ -36,10 +36,16 @@ STOPPED = 2
 class TimeoutException(Exception):
 	pass
 
+class EngineCloseException(Exception):
+	pass
+
 class SyncException(Exception):
 	pass
 
 class TaskException(Exception):
+	pass
+
+class SocketException(Exception):
 	pass
 
 class Engine(object):
@@ -175,7 +181,7 @@ class Engine(object):
 					logging.error("Exception in I/O task for fd %s",
 						fd, exc_info=True)
 
-		self._status = STOPPED
+		self.close()
 
 	def start(self):
 		# enter main loop
@@ -183,6 +189,19 @@ class Engine(object):
 			self.task.process()
 		except:
 			logging.error("Fatal Error", exc_info=True)
+
+	def close(self):
+		self._status = STOPPED
+		for timeout in self._timeouts:
+			timeout.task.kill(EngineCloseException)
+		self._timeouts = []
+		for fd, task in self._io_tasks.items():
+			if self._fake_sock.fileno() != fd:
+				task.kill(EngineCloseException)
+		self._io_tasks = {}
+		self._fake_sock.close()
+		self.task = None
+		delattr(Engine, "_instance")
 
 	def stop(self):
 		self._status = CLOSING
@@ -244,7 +263,7 @@ class Timer(object):
 			self._timeout = self.engine.add_timeout(next_deadline, self._run)
 
 class TaskBase(greenlet):
-	__slots__ = "func", "last_yield"
+	__slots__ = ("func",)
 
 	def __init__(self, func, parent=None):
 		self.func = func
@@ -284,7 +303,8 @@ class Task(TaskBase):
 	def _run(self, *args, **kwargs):
 		try:
 			self.func(*args, **kwargs)
-		except TimeoutException:
+		except (socket_error, TimeoutException, EngineCloseException) as e:
+			logging.warning(e)
 			pass
 		except Exception:
 			exc = sys.exc_info()
