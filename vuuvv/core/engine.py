@@ -7,10 +7,12 @@ import logging
 from time import time
 from datetime import timedelta
 from functools import wraps
+from _socket import error as socket_error
 
 from greenlet import greenlet
 
 #TODO: 对超时的IO进行定期处理
+#TODO: May be need a Waker
 
 # Constants
 _EPOLLIN = 0x001
@@ -37,7 +39,7 @@ class TimeoutException(Exception):
 class SyncException(Exception):
 	pass
 
-class PollException(Exception):
+class TaskException(Exception):
 	pass
 
 class Engine(object):
@@ -160,7 +162,7 @@ class Engine(object):
 					task.throw(SyncException)
 				try:
 					if events & ERROR:
-						task.throw(PollException)
+						task.throw(socket_error)
 						continue
 					task.process(fd, events)
 				except (OSError, IOError) as e:
@@ -199,7 +201,7 @@ class _Timeout(object):
 		else:
 			raise TypeError("Unsupported deadline %r" % deadline)
 		engine = engine or Engine.instance()
-		self.task = engine.task(callback)
+		self.task = Task(callback)
 
 	def __lt__(self, other):
 		return ((self.deadline, id(self)) < (other.deadline, id(other)))
@@ -273,12 +275,17 @@ class Task(TaskBase):
 	def start(self, engine=None):
 		engine = engine or Engine.instance()
 		engine.add_task(self)
+		status = engine._status
+		if status == STOPPED:
+			engine.start()
+		elif status == CLOSING:
+			raise TaskException("Engine is Closing, can't add task now")
 
 	def _run(self, *args, **kwargs):
 		try:
 			self.func(*args, **kwargs)
 		except TimeoutException:
-			logging.warning('This task is time out')
+			pass
 		except Exception:
 			exc = sys.exc_info()
 			self.parent.throw(*exc)
@@ -330,13 +337,19 @@ class _Select(object):
 _poll = _Select
 getcurrent = Task.getcurrent
 
-def wait_read(fd, engine=None):
+def wait(fd, status, deadline=None, engine=None):
 	engine = engine or Engine.instance()
-	engine.io(fd, READ | ERROR, getcurrent())
-	engine.task.switch()
+	task = getcurrent()
+	engine.io(fd, status, task)
+	if deadline is None:
+		engine.task.switch()
+	else:
+		_timeout = engine.add_timeout(deadline, task.timeout)
+		engine.task.switch()
+		engine.remove_timeout(_timeout)
 
-def wait_write(fd, engine=None):
-	engine = engine or Engine.instance()
-	engine.io(fd, WRITE | ERROR, getcurrent())
-	engine.task.switch()
+def task(func):
+	def wrap(*args, **kwargs):
+		Task(func, *args, **kwargs).start()
+	return wrap
 

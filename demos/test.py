@@ -10,7 +10,7 @@ if __name__ == '__main__':
 
 	sys.path.insert(0, "..")
 
-	from vuuvv.core.engine import Task, Engine, READ, WRITE, Timer, wait_write, wait_read
+	from vuuvv.core.engine import Task, Engine, READ, WRITE, Timer, task
 	from vuuvv.core.connection import Connection
 
 	#def cb(sock, fd, events):
@@ -34,12 +34,13 @@ if __name__ == '__main__':
 	def cb1():
 		print("hello")
 
+	@task
 	def connect():
 		conn = Connection()
-		conn.connect(("www.163.com", 80))
+		conn.connect(("www.163.com", 80), 1)
 		print("connected")
 		conn.write(b"GET / HTTP/1.1\r\nHost: www.163.com \r\n\r\n")
-		data = conn.read_until(b"\r\n\r\n")
+		data = conn.read_until(b"\r\n\r\n", 2)
 		print(data)
 		#try:
 		#	sock.connect(("smtp.163.com", 25))
@@ -54,12 +55,12 @@ if __name__ == '__main__':
 		#wait_read(sock.fileno())
 		#print(sock.recv(10))
 
-	t = Task(connect)
-	t.start()
+	#t = Task(connect)
+	#t.start()
+	connect()
 
 	#engine.add_timeout(timedelta(seconds=1), cb1)
 	#callback = functools.partial(cb, sock)
 	#engine.add_io(sock.fileno(), cb1, READ)
 	#engine.add_task(connect)
 	#Timer(cb1, 1000.0).start()
-	engine.start()
