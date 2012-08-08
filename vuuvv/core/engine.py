@@ -7,7 +7,9 @@ import logging
 from time import time
 from datetime import timedelta
 from functools import wraps
-from _socket import error as socket_error
+from socket import error as socket_error
+
+from .exceptions import TaskError, TimeoutError
 
 from greenlet import greenlet
 
@@ -32,21 +34,6 @@ ERROR = _EPOLLERR | _EPOLLHUP
 RUNNING = 0
 CLOSING = 1
 STOPPED = 2
-
-class TimeoutException(Exception):
-	pass
-
-class EngineCloseException(Exception):
-	pass
-
-class SyncException(Exception):
-	pass
-
-class TaskException(Exception):
-	pass
-
-class SocketException(Exception):
-	pass
 
 class Engine(object):
 	def __init__(self, impl=None):
@@ -74,22 +61,28 @@ class Engine(object):
 	def io(self, fd, events, task):
 		# a fd only appear in a task, a task can use many fds
 		_tasks = self._io_tasks
+
+		old_fd = task.fd
+		if old_fd is not None and old_fd != fd:
+			self._impl.modify(old_fd, ERROR)
+		task.fd = fd
+
 		if fd in _tasks:
-			assert task == getcurrent()
-			_tasks[fd].fd = fd
+			assert task == _tasks[fd]
 			self._impl.modify(fd, events | ERROR)
 		else:
 			_tasks[fd] = task
-			task.fd = fd
 			self._impl.register(fd, events | ERROR)
 
-	def kill(self, fd):
+	def kill(self, fd, force_kill_task=False):
 		task = self._io_tasks.pop(fd, None)
 		self._events.pop(fd, None)
 		try:
 			self._impl.unregister(fd)
 		except (OSError, IOError):
 			logging.debug("Error deleting fd from Engine", exec_info=True)
+		if force_kill_task:
+			task.kill()
 
 	def add_timeout(self, deadline, callback):
 		timeout = _Timeout(deadline, callback, self)
@@ -103,8 +96,8 @@ class Engine(object):
 		self._tasks.append(task)
 
 	def _add_fake_io(self):
-		import _socket
-		sock = _socket.socket()
+		import socket
+		sock = socket.socket()
 		# should keep the socket reference, or the sock may be closed out of 
 		# this function
 		self._fake_sock = sock
@@ -165,21 +158,11 @@ class Engine(object):
 				fd, events = self._events.popitem()
 				task = self._io_tasks[fd]
 				if fd != task.fd:
-					task.throw(SyncException)
-				try:
-					if events & ERROR:
-						task.throw(socket_error)
-						continue
-					task.process(fd, events)
-				except (OSError, IOError) as e:
-					if e.args[0] == errno.EPIPE:
-						pass
-					else:
-						logging.error("Exception in I/O task for fd %s",
-							fd, exc_info=True)
-				except Exception as e:
-					logging.error("Exception in I/O task for fd %s",
-						fd, exc_info=True)
+					task.kill(SyncError)
+				if events & ERROR:
+					task.kill(socket_error)
+					continue
+				task.process(fd, events)
 
 		self.close()
 
@@ -191,13 +174,13 @@ class Engine(object):
 			logging.error("Fatal Error", exc_info=True)
 
 	def close(self):
-		self._status = STOPPED
 		for timeout in self._timeouts:
-			timeout.task.kill(EngineCloseException)
+			timeout.task.kill()
 		self._timeouts = []
 		for fd, task in self._io_tasks.items():
 			if self._fake_sock.fileno() != fd:
-				task.kill(EngineCloseException)
+				task.kill()
+		self._status = STOPPED
 		self._io_tasks = {}
 		self._fake_sock.close()
 		self.task = None
@@ -270,15 +253,20 @@ class TaskBase(greenlet):
 		super(TaskBase, self).__init__(self._run, parent)
 
 	def process(self, *args, **kwargs):
-		self.switch(*args, **kwargs)
+		# exception catched is in task parent
+		try:
+			self.switch(*args, **kwargs)
+		except Exception as e:
+			logging.error("Exception in task", exc_info=True)
 
 	def timeout(self):
-		self.throw(TimeoutException)
+		self.throw(TimeoutError)
 
 	def kill(self, exception=greenlet.GreenletExit):
 		self.throw(exception)
 
 	def _run(self, *args, **kwargs):
+		# exception catched is in task internal
 		try:
 			self.func(*args, **kwargs)
 		except Exception:
@@ -298,14 +286,15 @@ class Task(TaskBase):
 		if status == STOPPED:
 			engine.start()
 		elif status == CLOSING:
-			raise TaskException("Engine is Closing, can't add task now")
+			raise TaskError("Engine is Closing, can't add task now")
 
 	def _run(self, *args, **kwargs):
 		try:
 			self.func(*args, **kwargs)
-		except (socket_error, TimeoutException, EngineCloseException) as e:
-			logging.warning(e)
+		except greenlet.GreenletExit:
 			pass
+		except TaskError as e:
+			logging.error(e)
 		except Exception:
 			exc = sys.exc_info()
 			self.parent.throw(*exc)
@@ -343,6 +332,7 @@ class _Select(object):
 		self.error_fds.discard(fd)
 
 	def poll(self, timeout):
+		self.read_fds, self.write_fds, self.error_fds
 		readable, writeable, errors = select.select(
 			self.read_fds, self.write_fds, self.error_fds, timeout)
 		events = {}

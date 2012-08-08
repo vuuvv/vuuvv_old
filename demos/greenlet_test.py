@@ -6,19 +6,12 @@ class T(greenlet):
 
 def t1():
 	print(12)
-	try:
-		g2.switch()
-	except Exception as e:
-		raise
+	g2.switch()
 	print(34)
 
 def t2():
 	print(56)
-	try:
-		1/0
-	except Exception as e:
-		import sys
-		g1.throw(*sys.exc_info())
+	1/0
 	print(78)
 
 import socket

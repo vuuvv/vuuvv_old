@@ -40,7 +40,7 @@ if __name__ == '__main__':
 		conn.connect(("www.163.com", 80), 1)
 		print("connected")
 		conn.write(b"GET / HTTP/1.1\r\nHost: www.163.com \r\n\r\n")
-		data = conn.read_until(b"\r\n\r\n", 2)
+		data = conn.read_until(b"\r\n\r\n", 0.002)
 		print(data)
 		#try:
 		#	sock.connect(("smtp.163.com", 25))
