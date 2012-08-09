@@ -75,14 +75,16 @@ class Engine(object):
 			self._impl.register(fd, events | ERROR)
 
 	def kill(self, fd, force_kill_task=False):
-		task = self._io_tasks.pop(fd, None)
-		self._events.pop(fd, None)
 		try:
 			self._impl.unregister(fd)
 		except (OSError, IOError):
 			logging.debug("Error deleting fd from Engine", exec_info=True)
-		if force_kill_task:
-			task.kill()
+		task = self._io_tasks.pop(fd, None)
+		self._events.pop(fd, None)
+		if task is not None:
+			task.fd = None
+			if force_kill_task:
+				task.kill()
 
 	def add_timeout(self, deadline, callback):
 		timeout = _Timeout(deadline, callback, self)
@@ -170,14 +172,19 @@ class Engine(object):
 		# enter main loop
 		try:
 			self.task.process()
+		except SystemExit:
+			self.close()
 		except:
 			logging.error("Fatal Error", exc_info=True)
 
 	def close(self):
-		for timeout in self._timeouts:
-			timeout.task.kill()
+		timeouts = self._timeouts
+		while timeouts:
+			timeouts.pop().task.kill()
 		self._timeouts = []
-		for fd, task in self._io_tasks.items():
+		_tasks = self._io_tasks
+		while _tasks:
+			fd, task = _tasks.popitem()
 			if self._fake_sock.fileno() != fd:
 				task.kill()
 		self._status = STOPPED
@@ -185,6 +192,7 @@ class Engine(object):
 		self._fake_sock.close()
 		self.task = None
 		delattr(Engine, "_instance")
+		return self
 
 	def stop(self):
 		self._status = CLOSING
@@ -320,7 +328,6 @@ class _Select(object):
 			self.write_fds.add(fd)
 		if events & ERROR:
 			self.error_fds.add(fd)
-			self.read_fds.add(fd)
 
 	def modify(self, fd, events):
 		self.unregister(fd)
@@ -332,7 +339,8 @@ class _Select(object):
 		self.error_fds.discard(fd)
 
 	def poll(self, timeout):
-		self.read_fds, self.write_fds, self.error_fds
+		print(len(self.read_fds), len(self.write_fds), len(self.error_fds))
+		#print(self.read_fds, self.write_fds, self.error_fds)
 		readable, writeable, errors = select.select(
 			self.read_fds, self.write_fds, self.error_fds, timeout)
 		events = {}

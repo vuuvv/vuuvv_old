@@ -10,9 +10,11 @@ from collections import deque
 from functools import partial
 
 from .engine import Engine, Task, wait, READ, WRITE, ERROR
-from .exceptions import (SocketError, ConnectError, ReadError, WriteError, 
-						 TimeoutError, SocketClosedUnexpected)
-from vuuvv.utils.error import strerror
+from .exceptions import (
+		ConnectionError, 
+		AcceptError,
+		TimeoutError,
+)
 
 def _socket_error_msg(descript, fd, err, msg):
 	if status & READ:
@@ -20,15 +22,22 @@ def _socket_error_msg(descript, fd, err, msg):
 
 class Connection(object):
 	def __init__(self, sock=None, engine=None, max_buffer_size=104857600,
-			read_chunk_size=4096):
+			read_chunk_size=4096, connected=False):
 		self.socket = sock or socket()
 		self.fileno = self.socket.fileno()
+		self.connected = connected
 		self.socket.setblocking(False)
 		self.engine = engine or Engine.instance()
 		self.max_buffer_size = max_buffer_size
 		self.read_chunk_size = read_chunk_size
 		self._read_buffer = deque()
 		self._read_buffer_size = 0
+		if connected:
+			self.remote_address = sock.getpeername()
+			self.local_address = sock.getsockname()
+		else:
+			self.remote_address = None
+			self.local_address = None
 
 	def _wait(self, status, deadline, timeout_callback):
 		try:
@@ -36,7 +45,7 @@ class Connection(object):
 		except socket_error as e:
 			errno = self.socket.getsockopt(SOL_SOCKET, SO_ERROR)
 			self.close()
-			raise SocketError(errno, strerror(errno), self.fileno)
+			raise ConnectionError(self, errno=errno)
 		except TimeoutError:
 			self.close()
 			raise timeout_callback()
@@ -58,60 +67,66 @@ class Connection(object):
 
 	def _read_timeout(self):
 		return TimeoutError("Read data from %s to %s timout on %d" %
-				(self._remote_address, self._local_address, self.fileno))
+				(self.remote_address, self.local_address, self.fileno))
 
 	def _write_timeout(self):
 		return TimeoutError("Write data from %s to %s timout on %d" %
-				(self._local_address, self._remote_address, self.fileno))
+				(self.local_address, self.remote_address, self.fileno))
 
 	def _connect_timeout(self):
 		return TimeoutError("Connect to %s timeout on %d" %
-				(self._remote_address, self.fileno))
+				(self.remote_address, self.fileno))
 
 	def close(self):
 		sock = self.socket
 		if sock is not None:
-			self.engine.kill(sock.fileno())
+			self.engine.kill(self.fileno)
 			sock.close()
 			self.socket = None
+		self.connected = False
 
 	def connect(self, address, timeout=0):
 		deadline = time() + timeout if timeout else None
 		sock = self.socket
 		try:
-			self._remote_address = address
+			self.remote_address = address
 			sock.connect(address)
+			self._wait_connect(deadline, None)
+			err = sock.getsockopt(SOL_SOCKET, SO_ERROR)
+			if err != 0:
+				self.close()
+				raise ConnectionError(self, "Connect error", errno=err)
+			self.local_address = sock.getsockname()
+			self.connected = True
 		except socket_error as e:
 			if e.args[0] not in (EINPROGRESS, EWOULDBLOCK):
 				self.close()
-				raise ConnectError(*(e.args + (self.fileno,)))
-		self._wait_connect(deadline, None)
-		err = sock.getsockopt(SOL_SOCKET, SO_ERROR)
-		if err != 0:
-			self.close()
-			raise ConnectError(err, strerror(err), self.fileno)
-		self._local_address = sock.getsockname()
+				raise ConnectionError(self, "Connect error", errno=e.args[0])
+		except TimeoutError as e:
+			logging.error(e)
 
 	def _read(self, deadline, timeout_callback):
 		# read the data from socket to _read_buffer
-		self._wait_read(deadline, timeout_callback)
 		try:
+			self._wait_read(deadline, timeout_callback)
 			chunk = self.socket.recv(self.read_chunk_size)
+			if not chunk:
+				# socket closed by the other end
+				self.close()
+				return 0
+			self._read_buffer.append(chunk)
+			length = len(chunk)
+			self._read_buffer_size += length
+			if self._read_buffer_size >= self.max_buffer_size:
+				self.close()
+				raise ConnectionError(self, "Reached maximum read buffer size")
+			return length
 		except socket_error as e:
-			# not check the EWOULDBLOCK and EAGAIN error, since we already wait
+			# don't check the EWOULDBLOCK and EAGAIN error, since we already wait
 			self.close()
-			raise ReadError(*(e.args + (self.fileno,)))
-		if not chunk:
-			# socket closed by the other end
-			self.close()
-			return 0
-		self._read_buffer.append(chunk)
-		length = len(chunk)
-		self._read_buffer_size += length
-		if self._read_buffer_size >= self.max_buffer_size:
-			self.close()
-			raise SocketError("Reached maximum read buffer size")
-		return length
+			raise ConnectionError(self, "Read error", errno=e.args[0])
+		except TimeoutError as e:
+			logging.error(e)
 
 	def read(self, n, timeout=0):
 		if n == 0:
@@ -134,17 +149,19 @@ class Connection(object):
 				else:
 					return self.read(n)
 
-	def read_until(self, delimiter, timeout=0):
+	def read_until(self, delimiter, timeout=0, length_limit=None):
 		deadline = time() + timeout if timeout else None
 
 		deque = self._read_buffer
 		if not deque:
 			if self._read(deadline, None) == 0:
-				raise SocketClosedUnexpected("Connection is closed and can't "
-					"find delimiter:%s" % (delimiter,))
+				raise ConnectionError(self, "Connection is closed and can't"
+					" find delimiter:%s" % delimiter)
 
 		# end bytes of last chunk
 		delimiter_len = len(delimiter)
+		if length_limit is not None:
+			length_limit -= delimiter_len
 		start = 0
 		merge_size = self.read_chunk_size
 
@@ -152,6 +169,8 @@ class Connection(object):
 			chunk = deque[0]
 			length = len(chunk)
 			loc = chunk.find(delimiter, start)
+			if length_limit is not None and length > length_limit and loc > length_limit:
+				raise ConncetionError(self, "Read until length limit exceeded")
 			if loc != -1:
 				# hit it
 				data_len = loc + delimiter_len
@@ -162,22 +181,24 @@ class Connection(object):
 			if len(deque) == 1:
 				# read buffer is exhausted
 				if self._read(deadline, None) == 0:
-					raise SocketClosedUnexpected("Connection is closed and can't "
-						"find delimiter:%s" % (delimiter,))
+					raise ConnectionError(self, "Connection is closed and"
+						"can't find delimiter:%s" % delimiter)
 			else:
 				# merge more deque entry
 				_merge(deque, merge_size)
 				start = max(length - delimiter_len, 0)
 
 	def _write(self, data, deadline, timeout_callback):
-		self._wait_write(deadline, timeout_callback)
 		try:
+			self._wait_write(deadline, timeout_callback)
 			n = self.socket.send(data)
 			if n == 0:
-				raise socket_error("Write error on %d: %s", self.fileno, e)
+				raise socket_error()
 		except socket_error as e:
 			self.close()
-			raise WriteError(*(e.args + (self.fileno,)))
+			raise ConnectionError(self, "Write error", errno=e.args[0])
+		except TimeoutError as e:
+			logging.error(e)
 
 	def write(self, data, timeout=0):
 		deadline = time() + timeout if timeout else None
@@ -193,7 +214,7 @@ class Connection(object):
 
 	def _check_closed(self):
 		if not self.socket:
-			raise SocketClosedUnexpected("Connection is closed, can't do any "
+			raise ConnectionError(self, "Connection is closed, can't do any "
 					"operation.")
 
 def wait_accept(sock, func, engine=None):
@@ -208,13 +229,14 @@ def wait_accept(sock, func, engine=None):
 			if errno != 0:
 				engine.kill(fd)
 				sock.close()
-				raise SocketError(errno, strerror(errno), fd)
+				raise AcceptError("Accept error: [%d] %s" % 
+						(fd, strerror(errno)))
 		except Exception:
 			engine.kill(fd)
 			sock.close()
 			raise
 
-		conn = Connection(client_sock, engine=engine)
+		conn = Connection(client_sock, engine=engine, connected=True)
 		Task(partial(func, conn, address)).start()
 
 class SSLConnection(Connection):

@@ -1,3 +1,4 @@
+from vuuvv.utils.error import strerror
 
 class TaskError(Exception):
 	"""
@@ -11,30 +12,31 @@ class TimeoutError(TaskError):
 class SyncError(TaskError):
 	pass
 
-class SocketError(TaskError):
-	def __repr__(self):
-		args = self.args
-		length = len(args)
-		if length == 0:
-			return ""
-		if length == 1:
-			return "Socket error: %s" % args
-		return "Socket error on %d: [%d] %s" % (args[2], args[0], args[1])
+class ConnectionError(TaskError):
+	def __init__(self, conn, msg=None, errno=None):
+		self.remote_addr = conn.remote_address
+		self.local_addr = conn.local_address
+		self.fd = conn.fileno
+		self.msg = msg or "Connection Error"
+		self.errno = errno
 
-class SocketClosedUnexpected(SocketError):
+	def __str__(self):
+		msg = self.msg
+		parts = []
+		if self.errno is not None:
+			msg = "%s: %s" % (msg, strerror(self.errno))
+			parts.append("errorcode: %d" % self.errno)
+		else:
+			msg += ": "
+		if self.fd is not None:
+			parts.append("fd: %d" % self.fd)
+		if self.remote_addr is not None:
+			parts.append("remote: %s:%d" % self.remote_addr)
+		if self.local_addr is not None:
+			parts.append("local: %s:%d" % self.local_addr)
+
+		return "%s[%s]." % (msg, ", ".join(parts))
+
+class AcceptError(TaskError):
 	pass
 
-class ConnectError(SocketError):
-	def __repr__(self):
-		args = self.args
-		return "Connect error on %d: [%d] %s" % (args[2], args[0], args[1])
-
-class ReadError(SocketError):
-	def __repr__(self):
-		args = self.args
-		return "Read error on %d: [%d] %s" % (args[2], args[0], args[1])
-
-class WriteError(SocketError):
-	def __repr__(self):
-		args = self.args
-		return "Write error on %d: [%d] %s" % (args[2], args[0], args[1])
