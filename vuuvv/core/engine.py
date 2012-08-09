@@ -339,7 +339,7 @@ class _Select(object):
 		self.error_fds.discard(fd)
 
 	def poll(self, timeout):
-		print(len(self.read_fds), len(self.write_fds), len(self.error_fds))
+		#print(len(self.read_fds), len(self.write_fds), len(self.error_fds))
 		#print(self.read_fds, self.write_fds, self.error_fds)
 		readable, writeable, errors = select.select(
 			self.read_fds, self.write_fds, self.error_fds, timeout)
